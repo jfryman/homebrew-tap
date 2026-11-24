@@ -1,0 +1,115 @@
+# Follow ferry releases. Every 6 hours (or on demand), compare the latest published release of
+# jfryman/ferry with Formula/ferry.rb. If it's newer and its tag carries a verified signature,
+# build, test and audit the bumped formula on Linux and macOS, then commit it to main.
+#
+# Runs entirely in this repository with its own GITHUB_TOKEN: no cross-repo token or secret.
+# The commit goes through the contents API, so GitHub signs it.
+name: bump
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+env:
+  FORMULA: ferry
+  UPSTREAM: jfryman/ferry
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      bump: ${{ steps.check.outputs.bump }}
+      version: ${{ steps.check.outputs.version }}
+      sha256: ${{ steps.check.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare the latest release with the formula
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(sed -nE 's|^  url ".*/refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz"$|\1|p' "Formula/${FORMULA}.rb")
+          tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          latest=${tag#v}
+          echo "formula: ${current}  latest release: ${latest}"
+          if ! [[ $latest =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::latest release tag '${tag}' is not vX.Y.Z; not bumping"
+            echo "bump=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [[ $latest == "$current" ]] || [[ $(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1) != "$latest" ]]; then
+            echo "Up to date."
+            echo "bump=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Releases are cut from signed tags. Refuse a tag whose signature GitHub can't verify.
+          ref=$(gh api "repos/${UPSTREAM}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')
+          type=${ref% *} obj=${ref#* }
+          if [[ $type == tag ]]; then
+            verified=$(gh api "repos/${UPSTREAM}/git/tags/${obj}" --jq .verification.verified)
+          else
+            verified=$(gh api "repos/${UPSTREAM}/git/commits/${obj}" --jq .verification.verified)
+          fi
+          if [[ $verified != true ]]; then
+            echo "::error::${tag} does not have a verified signature; not bumping"
+            exit 1
+          fi
+
+          url="https://github.com/${UPSTREAM}/archive/refs/tags/${tag}.tar.gz"
+          sha=$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)
+          echo "Bumping ${current} -> ${latest} (sha256 ${sha})"
+          {
+            echo "bump=true"
+            echo "version=${latest}"
+            echo "sha256=${sha}"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: check
+    if: needs.check.outputs.bump == 'true'
+    uses: ./.github/workflows/tests.yml
+    with:
+      formula: ferry
+      version: ${{ needs.check.outputs.version }}
+      sha256: ${{ needs.check.outputs.sha256 }}
+
+  commit:
+    needs: [check, test]
+    if: needs.check.outputs.bump == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Commit the bump to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+          SHA256: ${{ needs.check.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          path="Formula/${FORMULA}.rb"
+          blob=$(git rev-parse "HEAD:${path}")
+          .github/scripts/bump-formula "$FORMULA" "$VERSION" "$SHA256"
+          git diff
+          # The API rejects the write if main's copy changed since checkout (blob mismatch).
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${path}" \
+            -f message="${FORMULA} ${VERSION}" \
+            -f content="$(base64 -w0 "$path")" \
+            -f sha="$blob" \
+            -f branch=main \
+            --jq '.commit.html_url'
