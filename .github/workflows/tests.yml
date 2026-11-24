@@ -1,0 +1,65 @@
+# Build every formula from source, run its test block and audit it, on Linux and macOS.
+# bump.yml calls this with a new version before it commits the bump.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      formula:
+        type: string
+        default: ""
+      version:
+        type: string
+        default: ""
+      sha256:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Homebrew (taps this checkout as jfryman/tap)
+        uses: Homebrew/actions/setup-homebrew@61b401267256bb9c047d6d1481b176d5772a0ba7 # main
+
+      - name: Apply the proposed bump
+        if: inputs.version != ''
+        env:
+          FORMULA: ${{ inputs.formula }}
+          VERSION: ${{ inputs.version }}
+          SHA256: ${{ inputs.sha256 }}
+        run: |
+          tap="$(brew --repository jfryman/tap)"
+          cd "$tap"
+          .github/scripts/bump-formula "$FORMULA" "$VERSION" "$SHA256"
+          git diff --stat
+
+      - name: Install, test and audit
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          for f in "$(brew --repository jfryman/tap)"/Formula/*.rb; do
+            name="jfryman/tap/$(basename "$f" .rb)"
+            brew install --build-from-source "$name"
+            brew test "$name"
+            brew audit --strict --online "$name"
+          done
