@@ -3,8 +3,8 @@ class Ferry < Formula
 
   desc "Atlantis-style plan/apply/drift executor for Ansible"
   homepage "https://github.com/jfryman/ferry"
-  url "https://github.com/jfryman/ferry/archive/refs/tags/v0.4.2.tar.gz"
-  sha256 "b8994fa787cdd4c3a4dad9162a0299c7c89629675cac29d91bfe2e6d7aeffafd"
+  url "https://github.com/jfryman/ferry/archive/refs/tags/v0.5.0.tar.gz"
+  sha256 "a29c5fd4cb82c4dee3c03cd3525b8422df2d857deb8a8bea4e5a6a2c78f13846"
   license "MIT"
   head "https://github.com/jfryman/ferry.git", branch: "main"
 
